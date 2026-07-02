@@ -1,0 +1,296 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Automatically attaches an IAM instance profile to EC2 instances when they
+  enter the "running" state. The role is selected from an instance tag
+  (default tag key: IAMRole). If the tag is absent, a stack-provided default
+  role is used. Existing IAM roles are only associated (never created).
+  If an instance already has an instance profile at launch, it is left
+  untouched.
+
+Parameters:
+  TagKey:
+    Type: String
+    Default: 'IAMRole'
+    Description: >-
+      The EC2 tag key whose value specifies the IAM role name to attach.
+      If an instance does not have this tag, the DefaultRoleName is used.
+    MinLength: 1
+    MaxLength: 128
+
+  DefaultRoleName:
+    Type: String
+    Description: >-
+      Name of an EXISTING IAM role to attach when an instance has no matching
+      tag. This role must already exist; the stack does not create it.
+    MinLength: 1
+    MaxLength: 64
+
+Conditions:
+  IsChinaPartition: !Equals
+    - !Sub '${AWS::Partition}'
+    - 'aws-cn'
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Execution role for the onboarding Lambda
+  # ---------------------------------------------------------------------------
+  OnboardingLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: ec2-auto-attach-role-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # EC2 read + instance profile association management
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeIamInstanceProfileAssociations
+                  - ec2:AssociateIamInstanceProfile
+                  - ec2:DisassociateIamInstanceProfile
+                  - ec2:DescribeInstances
+                  - ec2:DescribeTags
+                Resource: '*'
+              # IAM instance profile lifecycle (create the profile container,
+              # add the target role to it). We never create the role itself.
+              - Effect: Allow
+                Action:
+                  - iam:CreateInstanceProfile
+                  - iam:GetInstanceProfile
+                  - iam:ListInstanceProfiles
+                  - iam:AddRoleToInstanceProfile
+                  - iam:GetRole
+                Resource: '*'
+              # PassRole so the instance profile's role can be handed to EC2.
+              - Effect: Allow
+                Action: iam:PassRole
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: !If
+                      - IsChinaPartition
+                      - ec2.amazonaws.com.cn
+                      - ec2.amazonaws.com
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*'
+              # CloudWatch Logs
+              - Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-AttachRole:*'
+
+  # ---------------------------------------------------------------------------
+  # The onboarding Lambda (code inlined; no external S3 artifact required)
+  # ---------------------------------------------------------------------------
+  AttachRoleLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-AttachRole'
+      Description: >-
+        Attaches an IAM role (from tag or default) to newly launched EC2
+        instances that have no instance profile.
+      Handler: index.handler
+      Runtime: python3.12
+      Timeout: 120
+      Role: !GetAtt OnboardingLambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          TAG_KEY: !Ref TagKey
+          DEFAULT_ROLE_NAME: !Ref DefaultRoleName
+      Code:
+        ZipFile: |
+          import os
+          import logging
+          import boto3
+
+          LOGGER = logging.getLogger()
+          LOGGER.setLevel(logging.INFO)
+
+          TAG_KEY = os.environ['TAG_KEY']
+          DEFAULT_ROLE_NAME = os.environ['DEFAULT_ROLE_NAME']
+
+          ec2 = boto3.client('ec2')
+          iam = boto3.client('iam')
+
+
+          def _get_instance_id(event):
+              if 'instance_id' in event:
+                  return event['instance_id']
+              detail = event.get('detail', {})
+              return detail.get('instance-id')
+
+
+          def _role_exists(role_name):
+              try:
+                  iam.get_role(RoleName=role_name)
+                  return True
+              except iam.exceptions.NoSuchEntityException:
+                  return False
+
+
+          def _get_desired_role(instance_id):
+              """Return the role name from the tag, or the default role."""
+              resp = ec2.describe_tags(
+                  Filters=[
+                      {'Name': 'resource-id', 'Values': [instance_id]},
+                      {'Name': 'key', 'Values': [TAG_KEY]},
+                  ]
+              )
+              tags = resp.get('Tags', [])
+              if tags and tags[0].get('Value'):
+                  role_name = tags[0]['Value'].strip()
+                  LOGGER.info(f'Instance {instance_id} has tag {TAG_KEY}={role_name}')
+                  if _role_exists(role_name):
+                      return role_name
+                  LOGGER.error(
+                      f'Tagged role "{role_name}" does not exist. '
+                      f'Falling back to default role "{DEFAULT_ROLE_NAME}".'
+                  )
+              else:
+                  LOGGER.info(
+                      f'Instance {instance_id} has no {TAG_KEY} tag. '
+                      f'Using default role "{DEFAULT_ROLE_NAME}".'
+                  )
+              return DEFAULT_ROLE_NAME
+
+
+          def _ensure_instance_profile(role_name):
+              """
+              An instance profile is the container EC2 requires to receive a role.
+              We reuse (or create) a profile named exactly after the role and make
+              sure the role is a member. The role itself is never created here.
+              """
+              profile_name = role_name
+              try:
+                  profile = iam.get_instance_profile(
+                      InstanceProfileName=profile_name
+                  )['InstanceProfile']
+              except iam.exceptions.NoSuchEntityException:
+                  LOGGER.info(f'Creating instance profile "{profile_name}"')
+                  profile = iam.create_instance_profile(
+                      InstanceProfileName=profile_name
+                  )['InstanceProfile']
+                  # New profile has no waiter dependency for AddRole, but it does
+                  # need a brief moment before EC2 association; boto retries cover it.
+
+              role_names = [r['RoleName'] for r in profile.get('Roles', [])]
+              if role_name not in role_names:
+                  LOGGER.info(
+                      f'Adding role "{role_name}" to instance profile "{profile_name}"'
+                  )
+                  iam.add_role_to_instance_profile(
+                      InstanceProfileName=profile_name,
+                      RoleName=role_name,
+                  )
+              return profile['Arn']
+
+
+          def onboard(instance_id):
+              # Respect an existing instance profile: skip, do not overwrite.
+              assoc = ec2.describe_iam_instance_profile_associations(
+                  Filters=[
+                      {'Name': 'instance-id', 'Values': [instance_id]},
+                      {'Name': 'state', 'Values': ['associating', 'associated']},
+                  ]
+              )['IamInstanceProfileAssociations']
+              if assoc:
+                  LOGGER.info(
+                      f'Instance {instance_id} already has an instance profile. '
+                      f'Skipping (no overwrite).'
+                  )
+                  return
+
+              role_name = _get_desired_role(instance_id)
+              if not _role_exists(role_name):
+                  LOGGER.error(
+                      f'Resolved role "{role_name}" does not exist. Aborting for '
+                      f'instance {instance_id}.'
+                  )
+                  return
+
+              profile_arn = _ensure_instance_profile(role_name)
+
+              import botocore
+              try:
+                  ec2.associate_iam_instance_profile(
+                      IamInstanceProfile={'Arn': profile_arn},
+                      InstanceId=instance_id,
+                  )
+                  LOGGER.info(
+                      f'Associated role "{role_name}" (profile {profile_arn}) '
+                      f'with instance {instance_id}'
+                  )
+              except botocore.exceptions.ClientError as e:
+                  # Handles the race where a profile is attached between our check
+                  # and our associate call.
+                  code = e.response['Error']['Code']
+                  if code == 'IncorrectState':
+                      LOGGER.info(
+                          f'Instance {instance_id} already has a profile (race). '
+                          f'Skipping.'
+                      )
+                  else:
+                      raise
+
+
+          def handler(event, context):
+              LOGGER.info(f'Event: {event}')
+              instance_id = _get_instance_id(event)
+              if not instance_id:
+                  LOGGER.error(f'No instance id found in event: {event}')
+                  return
+              onboard(instance_id)
+
+  # ---------------------------------------------------------------------------
+  # EventBridge rule: fire on EC2 entering "running"
+  # ---------------------------------------------------------------------------
+  InstanceRunningEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-InstanceRunning'
+      Description: Triggers the AttachRole Lambda when an EC2 instance starts running
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance State-change Notification
+        detail:
+          state:
+            - running
+      State: ENABLED
+      Targets:
+        - Id: AttachRoleTarget
+          Arn: !GetAtt AttachRoleLambda.Arn
+
+  EventRuleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt AttachRoleLambda.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt InstanceRunningEventRule.Arn
+
+Outputs:
+  LambdaFunctionName:
+    Description: Name of the onboarding Lambda function
+    Value: !Ref AttachRoleLambda
+  EventRuleName:
+    Description: Name of the EventBridge rule
+    Value: !Ref InstanceRunningEventRule
+  TagKeyInUse:
+    Description: The tag key used to look up a per-instance role
+    Value: !Ref TagKey
+  DefaultRoleInUse:
+    Description: The default role used when the tag is absent
+    Value: !Ref DefaultRoleName
