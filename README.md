@@ -1,5 +1,7 @@
 # ec2-auto-attach-role
 
+> 中文说明见 [README-CN.md](./README-CN.md)
+
 A self-contained CloudFormation stack that **automatically attaches an IAM
 instance profile to EC2 instances** as they enter the `running` state.
 
@@ -96,3 +98,4 @@ role.
 
 - `ec2-auto-attach-role.yaml` — the CloudFormation template (Lambda code is
   inlined, so no S3 artifact is needed).
+- `README-CN.md` — Chinese documentation.
