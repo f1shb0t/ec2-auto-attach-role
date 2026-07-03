@@ -5,8 +5,8 @@
 A self-contained CloudFormation stack that **automatically attaches an IAM
 instance profile to EC2 instances** as they enter the `running` state.
 
-It is inspired by the AWS "PVRE" onboarding pattern (EventBridge → Lambda →
-associate instance profile), but with a twist:
+It uses an EventBridge → Lambda → associate-instance-profile pattern with the
+following behavior:
 
 - If an instance carries a **tag** (default key `IAMRole`), the tag's value is
   treated as the **role name** to attach.

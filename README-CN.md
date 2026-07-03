@@ -2,7 +2,7 @@
 
 一个自包含的 CloudFormation 堆栈，在 EC2 实例进入 `running` 状态时**自动为其挂载 IAM 实例配置文件（instance profile）**。
 
-设计灵感来自 AWS 的 "PVRE" 上线模式（EventBridge → Lambda → 关联 instance profile），但做了一处关键改造：
+它采用 EventBridge → Lambda → 关联 instance profile 的模式，核心特性：
 
 - 如果实例带有指定 **tag**（默认 key 为 `IAMRole`），则用该 tag 的**值**作为要挂载的 **role 名**。
 - 如果实例**没有**该 tag，则挂载堆栈参数指定的**默认 role**。
