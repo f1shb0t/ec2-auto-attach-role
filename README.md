@@ -93,6 +93,12 @@ role.
   and logs an error.
 - Idempotent: re-invocations for an instance that already has a profile are
   skipped.
+- **IAM eventual consistency**: a freshly created instance profile is not
+  immediately visible to EC2. The Lambda waits on the `instance_profile_exists`
+  waiter, then retries `associate_iam_instance_profile` with exponential backoff
+  (1/2/4/8s, up to 5 attempts) to defeat the
+  `InvalidParameterValue: Invalid IAM Instance Profile ARN` race. Even if the
+  first association fails, EventBridge's async re-delivery is a safety net.
 
 ## Files
 

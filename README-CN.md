@@ -75,6 +75,7 @@ aws cloudformation deploy \
 - 如果 tag 指定的 role 不存在，Lambda 会回退到默认 role 并记录错误日志。
 - 幂等：对已有 profile 的实例重复触发会被跳过。
 - **同名 profile 提醒**：Lambda 假设 instance profile 与 role 同名。控制台/CFN 创建的 role 会自动带同名 profile，因此通常没问题。仅当你手工用 CLI 制造出"profile 名与 role 名故意错开且互相撞名"的非常规配置时，才可能因"一个 profile 最多只能装 1 个 role"的限制而报错。
+- **IAM 最终一致性**：新建的 instance profile 不会立刻对 EC2 可见。Lambda 会先用 `instance_profile_exists` waiter 等 IAM 确认，再对 `associate_iam_instance_profile` 做指数退避重试（1/2/4/8s，共 5 次），以消除 `InvalidParameterValue: Invalid IAM Instance Profile ARN` 竞态。即使首次关联偶发失败，EventBridge 的异步重投递也会兜底。
 
 ## 文件
 

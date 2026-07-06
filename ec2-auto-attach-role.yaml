@@ -111,8 +111,10 @@ Resources:
       Code:
         ZipFile: |
           import os
+          import time
           import logging
           import boto3
+          import botocore
 
           LOGGER = logging.getLogger()
           LOGGER.setLevel(logging.INFO)
@@ -181,8 +183,14 @@ Resources:
                   profile = iam.create_instance_profile(
                       InstanceProfileName=profile_name
                   )['InstanceProfile']
-                  # New profile has no waiter dependency for AddRole, but it does
-                  # need a brief moment before EC2 association; boto retries cover it.
+                  # A freshly created instance profile is not immediately visible
+                  # to EC2 (IAM eventual consistency). Wait until IAM confirms it
+                  # exists before we try to associate it, otherwise
+                  # associate_iam_instance_profile fails with
+                  # InvalidParameterValue "Invalid IAM Instance Profile ARN".
+                  iam.get_waiter('instance_profile_exists').wait(
+                      InstanceProfileName=profile_name
+                  )
 
               role_names = [r['RoleName'] for r in profile.get('Roles', [])]
               if role_name not in role_names:
@@ -221,26 +229,38 @@ Resources:
 
               profile_arn = _ensure_instance_profile(role_name)
 
-              import botocore
-              try:
-                  ec2.associate_iam_instance_profile(
-                      IamInstanceProfile={'Arn': profile_arn},
-                      InstanceId=instance_id,
-                  )
-                  LOGGER.info(
-                      f'Associated role "{role_name}" (profile {profile_arn}) '
-                      f'with instance {instance_id}'
-                  )
-              except botocore.exceptions.ClientError as e:
-                  # Handles the race where a profile is attached between our check
-                  # and our associate call.
-                  code = e.response['Error']['Code']
-                  if code == 'IncorrectState':
-                      LOGGER.info(
-                          f'Instance {instance_id} already has a profile (race). '
-                          f'Skipping.'
+              # Even after the IAM waiter, EC2's view of a new instance profile
+              # can lag by a few seconds. Retry associate with backoff on
+              # InvalidParameterValue ("Invalid IAM Instance Profile ARN").
+              for attempt in range(5):
+                  try:
+                      ec2.associate_iam_instance_profile(
+                          IamInstanceProfile={'Arn': profile_arn},
+                          InstanceId=instance_id,
                       )
-                  else:
+                      LOGGER.info(
+                          f'Associated role "{role_name}" (profile {profile_arn}) '
+                          f'with instance {instance_id}'
+                      )
+                      break
+                  except botocore.exceptions.ClientError as e:
+                      code = e.response['Error']['Code']
+                      if code == 'IncorrectState':
+                          # Race: a profile was attached between our check and
+                          # our associate call. Nothing to do.
+                          LOGGER.info(
+                              f'Instance {instance_id} already has a profile '
+                              f'(race). Skipping.'
+                          )
+                          break
+                      if code == 'InvalidParameterValue' and attempt < 4:
+                          wait = 2 ** attempt  # 1, 2, 4, 8s
+                          LOGGER.info(
+                              f'Instance profile not yet visible to EC2 '
+                              f'(attempt {attempt + 1}/5). Retrying in {wait}s.'
+                          )
+                          time.sleep(wait)
+                          continue
                       raise
 
 
