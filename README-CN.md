@@ -40,6 +40,30 @@ Lambda（AttachRole）
 
 ## 部署
 
+### 方式 A —— CloudFormation 控制台
+
+1. 打开 [CloudFormation 控制台](https://console.aws.amazon.com/cloudformation/)，
+   在右上角**确认当前 Region 是目标 Region**。堆栈只对**同 Region** 的实例生效。
+2. 点击 **创建堆栈（Create stack）** → **使用新资源（标准）**。
+3. 在**指定模板**处，选择 **上传模板文件（Upload a template file）**，点
+   **选择文件**，上传 `ec2-auto-attach-role.yaml`，点 **下一步**。
+   *（也可先把文件放到 S3，用 **Amazon S3 URL** 方式。）*
+4. 填写**堆栈名称**，如 `ec2-auto-attach-role`。
+5. 填写**参数（Parameters）**：
+   - **DefaultRoleName** —— 实例无匹配 tag 时挂载的**已存在** IAM role 名（必填）。
+   - **TagKey** —— 默认 `IAMRole`，需要用别的 tag key 时再改。
+   点 **下一步**。
+6. **配置堆栈选项**页保持默认（如组织有要求可加 tag/权限边界），点 **下一步**。
+7. 在**审核（Review）**页拉到底部，**勾选**：
+   *"我确认，AWS CloudFormation 可能创建 IAM 资源。"*
+   （等同于 CLI 的 `CAPABILITY_IAM`，因为堆栈要创建 Lambda 执行角色。）
+8. 点 **提交（Submit）**，等状态变为 **CREATE_COMPLETE**（通常 1 分钟内）。
+
+后续更新：选中堆栈 → **更新（Update）** → **替换现有模板** → 上传新的
+`ec2-auto-attach-role.yaml` → 逐步下一步并提交。
+
+### 方式 B —— AWS CLI
+
 ```bash
 aws cloudformation deploy \
   --template-file ec2-auto-attach-role.yaml \

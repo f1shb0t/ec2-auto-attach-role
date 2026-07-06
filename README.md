@@ -51,6 +51,35 @@ Lambda (AttachRole)
 
 ## Deploy
 
+### Option A — CloudFormation console
+
+1. Open the [CloudFormation console](https://console.aws.amazon.com/cloudformation/)
+   and confirm you are in the **target Region** (top-right Region selector).
+   The stack only acts on instances in the same Region it is deployed to.
+2. Click **Create stack** → **With new resources (standard)**.
+3. Under **Specify template**, choose **Upload a template file**, click
+   **Choose file**, and select `ec2-auto-attach-role.yaml`. Click **Next**.
+   *(Alternatively, host the file in S3 and use **Amazon S3 URL**.)*
+4. Enter a **Stack name**, e.g. `ec2-auto-attach-role`.
+5. Fill in **Parameters**:
+   - **DefaultRoleName** — name of an **existing** IAM role to attach when an
+     instance has no matching tag (required).
+   - **TagKey** — leave as `IAMRole` unless you want a different tag key.
+   Click **Next**.
+6. On **Configure stack options**, leave defaults (add tags/permissions if your
+   org requires them). Click **Next**.
+7. On the **Review** page, scroll to the bottom and **check the box**:
+   *"I acknowledge that AWS CloudFormation might create IAM resources."*
+   (This is the console equivalent of `CAPABILITY_IAM`; the stack creates the
+   Lambda execution role.)
+8. Click **Submit**. Wait until the stack status is **CREATE_COMPLETE**
+   (usually under a minute).
+
+To update later: select the stack → **Update** → **Replace existing template**
+→ upload the new `ec2-auto-attach-role.yaml` → step through and submit.
+
+### Option B — AWS CLI
+
 ```bash
 aws cloudformation deploy \
   --template-file ec2-auto-attach-role.yaml \
